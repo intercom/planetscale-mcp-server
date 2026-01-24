@@ -1,0 +1,44 @@
+{
+  "type": "module",
+  "name": "mcp-server",
+  "version": "0.0.0",
+  "author": "",
+  "description": "",
+  "private": true,
+  "keywords": [
+    "mcp",
+    "getgram.ai"
+  ],
+  "license": "ISC",
+  "main": "dist/functions.js",
+  "files": [
+    "src",
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "mcp-inspector --transport stdio nodemon -q --watch src --exec tsx ./src/server.ts",
+    "lint": "tsc --noEmit",
+    "push": "gf push",
+    "prebuild": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "build": "gf build"
+  },
+  "dependencies": {
+    "@gram-ai/functions": "^0.12.1",
+    "@modelcontextprotocol/sdk": "^1.20.1",
+    "@neondatabase/serverless": "^1.0.2",
+    "@planetscale/database": "^1.19.0",
+    "dotenv": "^17.2.3",
+    "zod": "^4"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/inspector": "^0.17.1",
+    "@types/node": "22.x",
+    "nodemon": "^3.1.9",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}
