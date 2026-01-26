@@ -121,6 +121,20 @@ export const executeWriteQueryGram = new Gram().tool({
       }
 
       if (error instanceof Error) {
+        // Check for "direct DDL is disabled" error (Vitess with safe migrations enabled)
+        if (error.message.includes("direct DDL is disabled")) {
+          const branchUrl = `https://app.planetscale.com/${input["organization"]}/${input["database"]}/${input["branch"]}`;
+          return ctx.text(
+            `Error: Direct DDL is disabled on this branch.\n\n` +
+            `This branch has safe migrations enabled, which means schema changes (CREATE, ALTER, DROP) ` +
+            `cannot be executed directly.\n\n` +
+            `To make schema changes, you can either:\n` +
+            `1. Disable safe migrations on this branch: ${branchUrl}\n` +
+            `2. Create a development branch, make your changes there, and deploy via a deploy request\n\n` +
+            `Learn more: https://planetscale.com/docs/concepts/safe-migrations`
+          );
+        }
+
         return ctx.text(`Error: ${error.message}`);
       }
 
