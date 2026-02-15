@@ -27,14 +27,19 @@ interface ClusterSizeSkuRaw {
   default_vtgate_rate?: number | null;
 }
 
+export interface ArchitectureRate {
+  architecture?: string;
+  rate: string | null;
+  replica_rate: string | null;
+}
+
 export interface TierSummary {
   name: string;
   type: "autoscaling" | "metal";
   cpu: string;
   ram: string;
-  providers: string[];
-  rate: string | null;
-  replica_rate: string | null;
+  providers?: string[];
+  rates: ArchitectureRate[];
   storage?: string;
   storage_options?: string[];
 }
@@ -52,27 +57,27 @@ function formatBytes(bytes: number): string {
 }
 
 /**
- * Format CPU string for display (e.g. "1" -> "1 vCPU", "1/2" -> "0.5 vCPU")
+ * Format CPU string for display (e.g. "1" -> "1 vCPU", "1/2" -> "1/2 vCPU")
  */
 function formatCpu(cpu: string): string {
-  if (cpu.includes("/")) {
-    const parts = cpu.split("/").map(Number);
-    const num = parts[0];
-    const den = parts[1];
-    if (num === undefined || den === undefined || den === 0) return `${cpu} vCPU`;
-    const value = num / den;
-    return value === 1 ? "1 vCPU" : `${value} vCPU`;
-  }
   return `${cpu} vCPU`;
 }
 
 /**
- * Format rate (cents or dollars) for display
+ * Map raw architecture string to human-readable label
+ */
+function formatArchitecture(arch: string): string {
+  if (arch === "aarch64") return "ARM";
+  if (arch === "x86_64") return "x86";
+  return arch;
+}
+
+/**
+ * Format rate (dollars) for display
  */
 function formatRate(rate: number | null): string | null {
   if (rate == null) return null;
-  const dollars = rate / 100;
-  return `$${dollars}/mo`;
+  return `$${rate}/mo`;
 }
 
 /**
@@ -124,12 +129,18 @@ async function fetchClusterSizeSkus(
     );
   }
 
-  const data = (await response.json()) as ClusterSizeSkuRaw[];
-  return Array.isArray(data) ? data : [];
+  const json = await response.json();
+  // Handle both raw array and { data: [...] } wrapper formats
+  if (Array.isArray(json)) return json as ClusterSizeSkuRaw[];
+  if (json != null && typeof json === "object" && "data" in json && Array.isArray(json.data)) {
+    return json.data as ClusterSizeSkuRaw[];
+  }
+  return [];
 }
 
 /**
  * Deduplicate SKUs by display_name and build compact tier summaries
+ * with per-architecture rate information.
  */
 function buildTierSummaries(
   skus: ClusterSizeSkuRaw[],
@@ -143,8 +154,7 @@ function buildTierSummaries(
       ram: string;
       providers: Set<string>;
       storageBytes: Set<number>;
-      rate: number | null;
-      replicaRate: number | null;
+      ratesByArch: Map<string, { rate: number | null; replicaRate: number | null }>;
       metal: boolean;
     }
   >();
@@ -164,20 +174,26 @@ function buildTierSummaries(
         ram: formatBytes(sku.ram),
         providers: new Set<string>(),
         storageBytes: new Set<number>(),
-        rate: sku.rate ?? null,
-        replicaRate: sku.replica_rate ?? null,
+        ratesByArch: new Map<string, { rate: number | null; replicaRate: number | null }>(),
         metal: isMetal,
       };
       byTier.set(key, tier);
     }
 
-    tier.providers.add(sku.provider);
+    if (sku.provider) tier.providers.add(sku.provider);
     if (isMetal && sku.storage != null && sku.storage > 0) {
       tier.storageBytes.add(sku.storage);
     }
-    if (sku.rate != null && tier.rate == null) tier.rate = sku.rate;
-    if (sku.replica_rate != null && tier.replicaRate == null)
-      tier.replicaRate = sku.replica_rate;
+
+    // Track rates per architecture, keeping the first non-null rate found
+    const arch = sku.architecture ? formatArchitecture(sku.architecture) : "default";
+    const archRates = tier.ratesByArch.get(arch);
+    if (!archRates) {
+      tier.ratesByArch.set(arch, { rate: sku.rate ?? null, replicaRate: sku.replica_rate ?? null });
+    } else {
+      if (sku.rate != null && archRates.rate == null) archRates.rate = sku.rate;
+      if (sku.replica_rate != null && archRates.replicaRate == null) archRates.replicaRate = sku.replica_rate;
+    }
   }
 
   const result: TierSummary[] = [];
@@ -185,18 +201,30 @@ function buildTierSummaries(
     (a, b) => a[1].sortOrder - b[1].sortOrder
   );
   for (const [displayName, tier] of entries) {
+    const rates: ArchitectureRate[] = [];
+    // Sort architectures so ARM comes before x86 for consistency
+    const sortedArchs = Array.from(tier.ratesByArch.entries()).sort(
+      (a, b) => a[0].localeCompare(b[0])
+    );
+    for (const [arch, archRates] of sortedArchs) {
+      if (archRates.rate != null || archRates.replicaRate != null) {
+        rates.push({
+          // Only include architecture label when there's an actual distinction
+          ...(arch !== "default" ? { architecture: arch } : {}),
+          rate: formatRate(archRates.rate),
+          replica_rate: formatRate(archRates.replicaRate),
+        });
+      }
+    }
+
+    const providers = Array.from(tier.providers).sort();
     const summary: TierSummary = {
       name: displayName,
       type: tier.metal ? "metal" : "autoscaling",
       cpu: formatCpu(tier.cpu),
       ram: tier.ram,
-      providers: Array.from(tier.providers).sort(),
-      rate: formatRate(tier.rate)
-        ? `${formatRate(tier.rate)} (HA cluster)`
-        : null,
-      replica_rate: formatRate(tier.replicaRate)
-        ? `${formatRate(tier.replicaRate)} (single instance)`
-        : null,
+      ...(providers.length > 0 ? { providers } : {}),
+      rates,
     };
     if (tier.metal && tier.storageBytes.size > 0) {
       summary.storage_options = Array.from(tier.storageBytes)
