@@ -17,12 +17,18 @@ import { getAuthToken, getAuthHeader } from "../lib/auth.ts";
 export const executeWriteQueryGram = new Gram().tool({
   name: "execute_write_query",
   description:
-    "Execute a write SQL query (INSERT, UPDATE, DELETE, or DDL) against a PlanetScale database. This tool creates short-lived credentials and executes the query securely. TRUNCATE is blocked. DELETE and UPDATE without WHERE clause are blocked. IMPORTANT: DELETE queries and DDL statements (CREATE, DROP, ALTER, RENAME) require human confirmation - you MUST ask the user for explicit approval before setting confirm_destructive: true. Never set confirm_destructive without first showing the user the exact query and getting their explicit 'yes' or approval.",
+    "Execute a write SQL query (INSERT, UPDATE, DELETE, or DDL) against a PlanetScale database. This tool creates short-lived credentials and executes the query securely. TRUNCATE is blocked. DELETE and UPDATE without WHERE clause are blocked. For Postgres only: use postgres_database_name when the user has created additional databases in the same cluster and wants to run the query against a non-default database. IMPORTANT: DELETE queries and DDL statements (CREATE, DROP, ALTER, RENAME) require human confirmation - you MUST ask the user for explicit approval before setting confirm_destructive: true. Never set confirm_destructive without first showing the user the exact query and getting their explicit 'yes' or approval.",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
     branch: z.string().describe("Branch name (e.g., 'main')"),
     query: z.string().describe("SQL INSERT/UPDATE/DELETE/DDL query to execute"),
+    postgres_database_name: z
+      .string()
+      .optional()
+      .describe(
+        "Postgres only: target database name to connect to. Use when the user has created additional databases in the same PlanetScale Postgres cluster (e.g. via CREATE DATABASE). Omit to use the default database for the branch."
+      ),
     confirm_destructive: z
       .boolean()
       .optional()
@@ -98,7 +104,12 @@ export const executeWriteQueryGram = new Gram().tool({
           authHeader
         );
 
-        const result = await executePostgresQuery(credentials, query);
+        const postgresDatabaseName = input["postgres_database_name"];
+        const result = await executePostgresQuery(
+          credentials,
+          query,
+          postgresDatabaseName
+        );
 
         // Delete the role and transfer ownership of any objects created by this
         // role to the 'postgres' role. This ensures future ephemeral users can
@@ -121,6 +132,14 @@ export const executeWriteQueryGram = new Gram().tool({
       }
 
       if (error instanceof Error) {
+        const postgresDbOverride = input["postgres_database_name"];
+        const isLikelyPostgresDbError =
+          postgresDbOverride &&
+          (error.message.includes("does not exist") ||
+            error.message.includes("database") ||
+            error.message.includes("connection") ||
+            error.message.includes("ECONNREFUSED"));
+
         // Check for "direct DDL is disabled" error (Vitess with safe migrations enabled)
         if (error.message.includes("direct DDL is disabled")) {
           const branchUrl = `https://app.planetscale.com/${input["organization"]}/${input["database"]}/${input["branch"]}`;
@@ -135,7 +154,11 @@ export const executeWriteQueryGram = new Gram().tool({
           );
         }
 
-        return ctx.text(`Error: ${error.message}`);
+        let message = error.message;
+        if (isLikelyPostgresDbError) {
+          message += ` If you set postgres_database_name, ensure "${postgresDbOverride}" exists in this branch (e.g. created via CREATE DATABASE).`;
+        }
+        return ctx.text(`Error: ${message}`);
       }
 
       return ctx.text("Error: An unexpected error occurred");

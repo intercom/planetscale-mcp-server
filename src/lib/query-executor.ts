@@ -70,11 +70,15 @@ export async function executeVitessQuery(
 }
 
 /**
- * Execute a query against a Postgres database using @neondatabase/serverless
+ * Execute a query against a Postgres database using @neondatabase/serverless.
+ * @param credentials - Short-lived Postgres credentials from the PlanetScale API.
+ * @param query - SQL query to execute.
+ * @param databaseNameOverride - Optional. When set, connect to this database instead of credentials.database_name. Use when the user has created additional databases in the same cluster.
  */
 export async function executePostgresQuery(
   credentials: PostgresCredentials,
-  query: string
+  query: string,
+  databaseNameOverride?: string
 ): Promise<QueryResult> {
   const startTime = performance.now();
 
@@ -86,7 +90,12 @@ export async function executePostgresQuery(
     ? `${credentials.username}|replica`
     : credentials.username;
 
-  const connectionUrl = `postgresql://${encodeURIComponent(username)}:${encodeURIComponent(credentials.password)}@${credentials.host}:5432/${encodeURIComponent(credentials.database_name)}`;
+  const databaseName =
+    databaseNameOverride !== undefined && databaseNameOverride !== ""
+      ? databaseNameOverride
+      : credentials.database_name;
+
+  const connectionUrl = `postgresql://${encodeURIComponent(username)}:${encodeURIComponent(credentials.password)}@${credentials.host}:5432/${encodeURIComponent(databaseName)}`;
 
   const sql = neon(connectionUrl);
 

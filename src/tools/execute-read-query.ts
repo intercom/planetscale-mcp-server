@@ -18,12 +18,18 @@ import { getAuthToken, getAuthHeader } from "../lib/auth.ts";
 export const executeReadQueryGram = new Gram().tool({
   name: "execute_read_query",
   description:
-    "Execute a read-only SQL query (SELECT, SHOW, DESCRIBE, EXPLAIN) against a PlanetScale database. This tool creates short-lived credentials and executes the query securely.",
+    "Execute a read-only SQL query (SELECT, SHOW, DESCRIBE, EXPLAIN) against a PlanetScale database. This tool creates short-lived credentials and executes the query securely. For Postgres only: use postgres_database_name when the user has created additional databases in the same cluster and wants to query a non-default database.",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
     branch: z.string().describe("Branch name (e.g., 'main')"),
     query: z.string().describe("SQL SELECT query to execute"),
+    postgres_database_name: z
+      .string()
+      .optional()
+      .describe(
+        "Postgres only: target database name to connect to. Use when the user has created additional databases in the same PlanetScale Postgres cluster (e.g. via CREATE DATABASE). Omit to use the default database for the branch."
+      ),
   },
   async execute(ctx, input) {
     try {
@@ -100,7 +106,12 @@ export const executeReadQueryGram = new Gram().tool({
         // Set replica flag for query execution
         credentials.replica = useReplica;
 
-        const result = await executePostgresQuery(credentials, query);
+        const postgresDatabaseName = input["postgres_database_name"];
+        const result = await executePostgresQuery(
+          credentials,
+          query,
+          postgresDatabaseName
+        );
 
         // Delete the role credentials after query execution
         await deletePostgresRole(
@@ -119,7 +130,18 @@ export const executeReadQueryGram = new Gram().tool({
       }
 
       if (error instanceof Error) {
-        return ctx.text(`Error: ${error.message}`);
+        let message = error.message;
+        const postgresDbOverride = input["postgres_database_name"];
+        if (
+          postgresDbOverride &&
+          (message.includes("does not exist") ||
+            message.includes("database") ||
+            message.includes("connection") ||
+            message.includes("ECONNREFUSED"))
+        ) {
+          message += ` If you set postgres_database_name, ensure "${postgresDbOverride}" exists in this branch (e.g. created via CREATE DATABASE).`;
+        }
+        return ctx.text(`Error: ${message}`);
       }
 
       return ctx.text(`Error: An unexpected error occurred`);
