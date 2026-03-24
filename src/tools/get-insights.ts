@@ -159,7 +159,10 @@ async function fetchInsights(
   authHeader: string,
   tabletType?: string,
   fields?: string[],
-  q?: string
+  q?: string,
+  from?: string,
+  to?: string,
+  period?: string
 ): Promise<InsightsEntry[]> {
   let url = `${API_BASE}/organizations/${encodeURIComponent(organization)}/databases/${encodeURIComponent(database)}/branches/${encodeURIComponent(branch)}/insights?per_page=${limit}&sort=${sortBy}&dir=desc`;
   if (tabletType) {
@@ -170,6 +173,15 @@ async function fetchInsights(
   }
   if (q) {
     url += `&q=${encodeURIComponent(q)}`;
+  }
+  if (from) {
+    url += `&from=${encodeURIComponent(from)}`;
+  }
+  if (to) {
+    url += `&to=${encodeURIComponent(to)}`;
+  }
+  if (period) {
+    url += `&period=${encodeURIComponent(period)}`;
   }
 
   const response = await fetch(url, {
@@ -380,6 +392,7 @@ async function fetchSelectedQueries(
     keyspace?: string;
     from?: string;
     to?: string;
+    period?: string;
     perPage: number;
     tabletType?: string;
   },
@@ -445,7 +458,7 @@ async function fetchSelectedQueries(
 export const getInsightsGram = new Gram().tool({
   name: "get_insights",
   description:
-    "Get query performance insights for a PlanetScale database branch. By default, aggregates the top queries across 5 different metrics (slowest, most time-consuming, most rows read, most inefficient, most rows affected) for a comprehensive view. Can also fetch queries sorted by a single metric. Supports filtering by tablet type (primary/replica). To drill down into a specific query pattern, first call without fingerprint to discover queries (each result includes a `fingerprint` and `keyspace`), then call again with both `fingerprint` and `keyspace` from that result to get the aggregated summary stats and individual executions.",
+    "Get query performance insights for a PlanetScale database branch. By default, aggregates the top queries across 5 different metrics (slowest, most time-consuming, most rows read, most inefficient, most rows affected) for a comprehensive view. Can also fetch queries sorted by a single metric. Supports filtering by tablet type (primary/replica). To drill down into a specific query pattern, first call without fingerprint to discover queries (each result includes a `fingerprint` and `keyspace`), then call again with both `fingerprint` and `keyspace` from that result to get the aggregated summary stats and individual executions. Note: egress_bytes values are raw bytes; the PlanetScale UI displays these as binary megabytes (1 MB = 2^20 bytes). Durations (sum_total_duration_millis) are in milliseconds.",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
@@ -500,17 +513,23 @@ export const getInsightsGram = new Gram().tool({
       .describe(
         "Keyspace for fingerprint drill-down. Required to get summary data. Use the `keyspace` value returned in insights results (e.g. 'my_keyspace' for MySQL/Vitess or 'postgres.public' for Postgres databases)."
       ),
+    period: z
+      .string()
+      .optional()
+      .describe(
+        "Shorthand for a recent time window ending at now. Valid values: '15m', '1h', '3h', '6h', '12h', '24h'. Cannot be combined with from/to — use one or the other. Only supported in discovery mode (ignored in fingerprint mode — use from/to instead)."
+      ),
     from: z
       .string()
       .optional()
       .describe(
-        "Start of time range (ISO 8601 format, e.g. '2026-03-09T00:00:00.000Z'). Defaults to 24 hours ago. Only used in fingerprint mode."
+        "Start of time range (ISO 8601 format, e.g. '2026-03-09T00:00:00.000Z'). Defaults to 24 hours ago. Supported in both discovery and fingerprint modes."
       ),
     to: z
       .string()
       .optional()
       .describe(
-        "End of time range (ISO 8601 format). Defaults to now. Only used in fingerprint mode."
+        "End of time range (ISO 8601 format). Defaults to now. Supported in both discovery and fingerprint modes."
       ),
   },
   async execute(ctx, input) {
@@ -534,6 +553,12 @@ export const getInsightsGram = new Gram().tool({
       if (!organization || !database || !branch) {
         return ctx.text(
           "Error: organization, database, and branch are required"
+        );
+      }
+
+      if (input["period"] && (input["from"] || input["to"])) {
+        return ctx.text(
+          "Error: 'period' cannot be combined with 'from'/'to'. Use either period (e.g. '1h', '6h') for a recent window, or from/to for a specific time range."
         );
       }
 
@@ -601,6 +626,10 @@ export const getInsightsGram = new Gram().tool({
         });
       }
 
+      const from = input["from"];
+      const to = input["to"];
+      const period = input["period"];
+
       if (sortBy === "all") {
         // Aggregate mode: fetch from all 5 metrics and deduplicate
         const uniqueEntries = new Map<string, Partial<InsightsEntry>>();
@@ -615,7 +644,10 @@ export const getInsightsGram = new Gram().tool({
             authHeader,
             tabletType,
             fields,
-            q
+            q,
+            from,
+            to,
+            period
           );
 
           for (const entry of entries) {
@@ -644,7 +676,10 @@ export const getInsightsGram = new Gram().tool({
           authHeader,
           tabletType,
           fields,
-          q
+          q,
+          from,
+          to,
+          period
         );
 
         const results = entries.map(filterEntry);
