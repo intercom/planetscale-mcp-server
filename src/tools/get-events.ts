@@ -64,6 +64,53 @@ function deployRequestToEvent(entry: DeployRequest): TimelineEvent {
   };
 }
 
+// ── Keyspace resizes ──────────────────────────────────────────────────
+
+interface KeyspaceResizeEntry {
+  id: string;
+  state: string;
+  completed_at: string | null;
+  created_at: string;
+  cluster_rate_display_name: string;
+  actor: Actor;
+}
+
+function keyspaceResizeToEvent(keyspace: string, entry: KeyspaceResizeEntry): TimelineEvent {
+  return {
+    type: "keyspace_resize",
+    at: entry.completed_at ?? entry.created_at,
+    summary: `Keyspace resize (${keyspace}) to ${entry.cluster_rate_display_name} by ${entry.actor.display_name} (${entry.state})`,
+  };
+}
+
+// ── Shard resizes ─────────────────────────────────────────────────────
+
+interface ShardResizeEntry {
+  id: string;
+  state: string;
+  key_range: string;
+  cluster_display_name: string;
+  previous_cluster_display_name: string;
+  completed_at: string | null;
+  created_at: string;
+  actor: Actor;
+}
+
+function shardResizeToEvent(keyspace: string, entry: ShardResizeEntry): TimelineEvent {
+  return {
+    type: "shard_resize",
+    at: entry.completed_at ?? entry.created_at,
+    summary: `Shard resize (${keyspace} ${entry.key_range}) ${entry.previous_cluster_display_name} → ${entry.cluster_display_name} by ${entry.actor.display_name} (${entry.state})`,
+  };
+}
+
+// ── Keyspace discovery ────────────────────────────────────────────────
+
+interface BranchKeyspace {
+  name: string;
+  sharded: boolean;
+}
+
 // ── Fetch helpers ─────────────────────────────────────────────────────
 
 interface PaginatedList<T> {
@@ -117,12 +164,34 @@ function buildDeployRequestsUrl(
   return `${API_BASE}/organizations/${e(org)}/databases/${e(db)}/deploy-requests?${params}`;
 }
 
+function buildKeyspacesUrl(
+  org: string, db: string, branch: string,
+): string {
+  return `${API_BASE}/organizations/${e(org)}/databases/${e(db)}/branches/${e(branch)}/keyspaces`;
+}
+
+function buildKeyspaceResizesUrl(
+  org: string, db: string, branch: string, keyspace: string,
+): string {
+  const params = new URLSearchParams();
+  params.set("per_page", "25");
+  return `${API_BASE}/organizations/${e(org)}/databases/${e(db)}/branches/${e(branch)}/keyspaces/${e(keyspace)}/resizes?${params}`;
+}
+
+function buildShardResizesUrl(
+  org: string, db: string, branch: string, keyspace: string,
+): string {
+  const params = new URLSearchParams();
+  params.set("per_page", "25");
+  return `${API_BASE}/organizations/${e(org)}/databases/${e(db)}/branches/${e(branch)}/keyspaces/${e(keyspace)}/shard-resizes?${params}`;
+}
+
 // ── Tool definition ───────────────────────────────────────────────────
 
 export const getEventsGram = new Gram().tool({
   name: "get_events",
   description:
-    "Get a unified chronological timeline of PlanetScale events for a database branch within a time range. Combines VTGate resizes and deploy requests (schema migrations) into a single sorted event stream. Useful for incident investigation — call with the incident time window to see everything that changed.",
+    "Get a unified chronological timeline of PlanetScale events for a database branch within a time range. Combines VTGate resizes, keyspace/VTTablet resizes, individual shard resizes, and deploy requests (schema migrations) into a single sorted event stream. Automatically discovers keyspaces and fetches per-keyspace resize history. Useful for incident investigation — call with the incident time window to see everything that changed.",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
@@ -159,9 +228,11 @@ export const getEventsGram = new Gram().tool({
 
       const authHeader = getAuthHeader(env);
       const range = buildRange(from, to);
+      const fromTime = new Date(from).getTime();
+      const toTime = new Date(to).getTime();
 
-      // Fetch all event sources in parallel
-      const [branchResizes, deployRequests] =
+      // Phase 1: Fetch event sources + keyspace list in parallel
+      const [branchResizes, deployRequests, keyspaceList] =
         await Promise.allSettled([
           apiFetch<PaginatedList<BranchResizeEntry>>(
             buildBranchResizesUrl(organization, database, branch, range),
@@ -173,7 +244,45 @@ export const getEventsGram = new Gram().tool({
             authHeader,
             "deploy requests",
           ),
+          apiFetch<PaginatedList<BranchKeyspace>>(
+            buildKeyspacesUrl(organization, database, branch),
+            authHeader,
+            "keyspaces",
+          ),
         ]);
+
+      // Phase 2: Fan out per-keyspace resize calls
+      const allKeyspaces: string[] = [];
+      const shardedKeyspaces: string[] = [];
+      if (keyspaceList.status === "fulfilled") {
+        for (const ks of keyspaceList.value.data) {
+          allKeyspaces.push(ks.name);
+          if (ks.sharded) {
+            shardedKeyspaces.push(ks.name);
+          }
+        }
+      }
+
+      const [keyspaceResizeResults, shardResizeResults] = await Promise.all([
+        Promise.allSettled(
+          allKeyspaces.map((ks) =>
+            apiFetch<PaginatedList<KeyspaceResizeEntry>>(
+              buildKeyspaceResizesUrl(organization, database, branch, ks),
+              authHeader,
+              `keyspace resizes (${ks})`,
+            ).then((list) => ({ keyspace: ks, list }))
+          ),
+        ),
+        Promise.allSettled(
+          shardedKeyspaces.map((ks) =>
+            apiFetch<PaginatedList<ShardResizeEntry>>(
+              buildShardResizesUrl(organization, database, branch, ks),
+              authHeader,
+              `shard resizes (${ks})`,
+            ).then((list) => ({ keyspace: ks, list }))
+          ),
+        ),
+      ]);
 
       const events: TimelineEvent[] = [];
       const errors: string[] = [];
@@ -201,6 +310,42 @@ export const getEventsGram = new Gram().tool({
         }
       } else {
         errors.push(`deploy requests: ${formatError(deployRequests.reason)}`);
+      }
+
+      if (keyspaceList.status === "rejected") {
+        errors.push(`keyspace discovery: ${formatError(keyspaceList.reason)}`);
+      }
+
+      for (const r of keyspaceResizeResults) {
+        if (r.status === "fulfilled") {
+          const { keyspace, list } = r.value;
+          for (const entry of list.data) {
+            const at = new Date(entry.completed_at ?? entry.created_at).getTime();
+            if (at >= fromTime && at <= toTime) {
+              events.push(keyspaceResizeToEvent(keyspace, entry));
+            }
+          }
+        } else {
+          errors.push(`keyspace resizes: ${formatError(r.reason)}`);
+        }
+      }
+
+      for (const r of shardResizeResults) {
+        if (r.status === "fulfilled") {
+          const { keyspace, list } = r.value;
+          // Client-side time filtering since the API ignores completed_at
+          for (const entry of list.data) {
+            const at = new Date(entry.completed_at ?? entry.created_at).getTime();
+            if (at >= fromTime && at <= toTime) {
+              events.push(shardResizeToEvent(keyspace, entry));
+            }
+          }
+          if (list.next_page != null) {
+            truncated.push(`shard_resizes(${r.value.keyspace})`);
+          }
+        } else {
+          errors.push(`shard resizes: ${formatError(r.reason)}`);
+        }
       }
 
       // Sort chronologically
