@@ -104,6 +104,57 @@ function shardResizeToEvent(keyspace: string, entry: ShardResizeEntry): Timeline
   };
 }
 
+// ── Workflows (decomposed into milestone events) ─────────────────────
+
+interface Workflow {
+  name: string;
+  number: number;
+  state: string;
+  workflow_type: string;
+  source_keyspace: { name: string } | null;
+  target_keyspace: { name: string } | null;
+  actor: Actor | null;
+  started_at: string | null;
+  data_copy_completed_at: string | null;
+  verify_data_at: string | null;
+  switch_replicas_at: string | null;
+  switch_primaries_at: string | null;
+  cutover_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  reversed_at: string | null;
+  workflow_errors: string | null;
+}
+
+function workflowToEvents(entry: Workflow): TimelineEvent[] {
+  const label = `Workflow #${entry.number} (${entry.workflow_type}): ${entry.name}`;
+  const events: TimelineEvent[] = [];
+
+  const milestones: [string | null, string][] = [
+    [entry.started_at, "started"],
+    [entry.data_copy_completed_at, "data copy completed"],
+    [entry.verify_data_at, "data verified"],
+    [entry.switch_replicas_at, "replicas switched"],
+    [entry.switch_primaries_at, "primaries switched"],
+    [entry.cutover_at, "cutover"],
+    [entry.completed_at, "completed"],
+    [entry.cancelled_at, "cancelled"],
+    [entry.reversed_at, "reversed"],
+  ];
+
+  for (const [ts, milestone] of milestones) {
+    if (ts) {
+      events.push({
+        type: "workflow",
+        at: ts,
+        summary: `${label} — ${milestone}`,
+      });
+    }
+  }
+
+  return events;
+}
+
 // ── Keyspace discovery ────────────────────────────────────────────────
 
 interface BranchKeyspace {
@@ -164,6 +215,15 @@ function buildDeployRequestsUrl(
   return `${API_BASE}/organizations/${e(org)}/databases/${e(db)}/deploy-requests?${params}`;
 }
 
+function buildWorkflowsUrl(
+  org: string, db: string, range: string,
+): string {
+  const params = new URLSearchParams();
+  params.set("between", range);
+  params.set("per_page", "25");
+  return `${API_BASE}/organizations/${e(org)}/databases/${e(db)}/workflows?${params}`;
+}
+
 function buildKeyspacesUrl(
   org: string, db: string, branch: string,
 ): string {
@@ -191,7 +251,7 @@ function buildShardResizesUrl(
 export const getEventsGram = new Gram().tool({
   name: "get_events",
   description:
-    "Get a unified chronological timeline of PlanetScale events for a database branch within a time range. Combines VTGate resizes, keyspace/VTTablet resizes, individual shard resizes, and deploy requests (schema migrations) into a single sorted event stream. Automatically discovers keyspaces and fetches per-keyspace resize history. Useful for incident investigation — call with the incident time window to see everything that changed.",
+    "Get a unified chronological timeline of all PlanetScale events for a database branch within a time range. Combines VTGate resizes, keyspace/VTTablet resizes, individual shard resizes, deploy requests (schema migrations), and VReplication workflow milestones (MoveTables/Reshard) into a single sorted event stream. Workflows are decomposed into individual milestone events (started, data copy, verify, switch replicas, switch primaries, cutover, completed). Automatically discovers keyspaces and fetches per-keyspace resize history. Useful for incident investigation — call with the incident time window to see everything that changed.",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
@@ -232,7 +292,7 @@ export const getEventsGram = new Gram().tool({
       const toTime = new Date(to).getTime();
 
       // Phase 1: Fetch event sources + keyspace list in parallel
-      const [branchResizes, deployRequests, keyspaceList] =
+      const [branchResizes, deployRequests, workflows, keyspaceList] =
         await Promise.allSettled([
           apiFetch<PaginatedList<BranchResizeEntry>>(
             buildBranchResizesUrl(organization, database, branch, range),
@@ -243,6 +303,11 @@ export const getEventsGram = new Gram().tool({
             buildDeployRequestsUrl(organization, database, branch, range),
             authHeader,
             "deploy requests",
+          ),
+          apiFetch<PaginatedList<Workflow>>(
+            buildWorkflowsUrl(organization, database, range),
+            authHeader,
+            "workflows",
           ),
           apiFetch<PaginatedList<BranchKeyspace>>(
             buildKeyspacesUrl(organization, database, branch),
@@ -310,6 +375,18 @@ export const getEventsGram = new Gram().tool({
         }
       } else {
         errors.push(`deploy requests: ${formatError(deployRequests.reason)}`);
+      }
+
+      if (workflows.status === "fulfilled") {
+        const list = workflows.value;
+        for (const entry of list.data) {
+          events.push(...workflowToEvents(entry));
+        }
+        if (list.next_page != null) {
+          truncated.push("workflows");
+        }
+      } else {
+        errors.push(`workflows: ${formatError(workflows.reason)}`);
       }
 
       if (keyspaceList.status === "rejected") {

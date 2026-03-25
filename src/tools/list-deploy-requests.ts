@@ -163,10 +163,91 @@ async function fetchDeployRequests(
   return (await response.json()) as PaginatedList<DeployRequest>;
 }
 
+interface Workflow {
+  id: string;
+  name: string;
+  number: number;
+  state: string;
+  workflow_type: string;
+  workflow_subtype: string;
+  started_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  reversed_at: string | null;
+  data_copy_completed_at: string | null;
+  verify_data_at: string | null;
+  switch_replicas_at: string | null;
+  switch_primaries_at: string | null;
+  cutover_at: string | null;
+  replicas_switched: boolean;
+  primaries_switched: boolean;
+  workflow_errors: string | null;
+  source_keyspace: { name: string } | null;
+  target_keyspace: { name: string } | null;
+  actor: Actor | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function summarizeWorkflow(entry: Workflow) {
+  return {
+    number: entry.number,
+    name: entry.name,
+    state: entry.state,
+    workflow_type: entry.workflow_type,
+    source_keyspace: entry.source_keyspace?.name ?? null,
+    target_keyspace: entry.target_keyspace?.name ?? null,
+    actor: entry.actor?.display_name ?? null,
+    created_at: entry.created_at,
+    started_at: entry.started_at,
+    data_copy_completed_at: entry.data_copy_completed_at,
+    verify_data_at: entry.verify_data_at,
+    switch_replicas_at: entry.switch_replicas_at,
+    switch_primaries_at: entry.switch_primaries_at,
+    cutover_at: entry.cutover_at,
+    completed_at: entry.completed_at,
+    ...(entry.workflow_errors ? { errors: entry.workflow_errors } : {}),
+  };
+}
+
+async function fetchWorkflows(
+  organization: string,
+  database: string,
+  authHeader: string,
+  options: {
+    from?: string;
+    to?: string;
+    page: number;
+    perPage: number;
+  },
+): Promise<PaginatedList<Workflow>> {
+  const params = new URLSearchParams();
+  params.set("page", String(options.page));
+  params.set("per_page", String(options.perPage));
+  if (options.from && options.to) {
+    params.set("between", buildRangeFilter(options.from, options.to));
+  }
+
+  const url = `${API_BASE}/organizations/${encodeURIComponent(organization)}/databases/${encodeURIComponent(database)}/workflows?${params}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: authHeader, Accept: "application/json" },
+  });
+
+  if (!response.ok) {
+    let details: unknown;
+    try { details = await response.json(); } catch { details = await response.text(); }
+    throw new PlanetScaleAPIError(`Failed to fetch workflows: ${response.statusText}`, response.status, details);
+  }
+
+  return (await response.json()) as PaginatedList<Workflow>;
+}
+
 export const listDeployRequestsGram = new Gram().tool({
   name: "list_deploy_requests",
   description:
-    "List deploy requests (schema migrations) for a PlanetScale database. Deploy requests show DDL operations (ALTER TABLE, CREATE INDEX, etc.) and their progress.",
+    "List deploy requests (schema migrations) and VReplication workflows for a PlanetScale database. Deploy requests show DDL operations (ALTER TABLE, CREATE INDEX, etc.) and their progress. Workflows show MoveTables/Reshard operations with milestone timestamps (data copy, verify, switch replicas, switch primaries, cutover, complete).",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
@@ -182,13 +263,19 @@ export const listDeployRequestsGram = new Gram().tool({
       .string()
       .optional()
       .describe(
-        "Start of time range (ISO 8601, e.g., '2026-03-25T00:00:00.000Z'). Filters deploy requests by deployed_at. Must be paired with 'to'.",
+        "Start of time range (ISO 8601, e.g., '2026-03-25T00:00:00.000Z'). Filters deploy requests by deployed_at and workflows by active time range. Must be paired with 'to'.",
       ),
     to: z
       .string()
       .optional()
       .describe(
         "End of time range (ISO 8601, e.g., '2026-03-25T23:59:00.000Z'). Must be paired with 'from'.",
+      ),
+    include_workflows: z
+      .boolean()
+      .optional()
+      .describe(
+        "Include VReplication workflows (MoveTables, Reshard) with milestone timestamps (default: false).",
       ),
     page: z.number().optional().describe("Page number (default: 1)"),
     per_page: z
@@ -216,24 +303,64 @@ export const listDeployRequestsGram = new Gram().tool({
       const page = input.page ?? 1;
       const perPage = Math.min(input.per_page ?? 10, 25);
       const authHeader = getAuthHeader(env);
+      const includeWorkflows = input.include_workflows ?? false;
 
-      const list = await fetchDeployRequests(organization, database, authHeader, {
-        intoBranch: input.into_branch,
-        state: input.state,
-        deployedAtFrom: input.from,
-        deployedAtTo: input.to,
-        page,
-        perPage,
-      });
+      const [deployResult, workflowResult] = await Promise.allSettled([
+        fetchDeployRequests(organization, database, authHeader, {
+          intoBranch: input.into_branch,
+          state: input.state,
+          deployedAtFrom: input.from,
+          deployedAtTo: input.to,
+          page,
+          perPage,
+        }),
+        includeWorkflows
+          ? fetchWorkflows(organization, database, authHeader, {
+              from: input.from,
+              to: input.to,
+              page,
+              perPage,
+            })
+          : Promise.resolve(null),
+      ]);
 
-      return ctx.json({
-        organization,
-        database,
-        total: list.data.length,
-        page: list.current_page,
-        next_page: list.next_page,
-        requests: list.data.map(summarizeDeployRequest),
-      });
+      const result: Record<string, unknown> = { organization, database };
+
+      if (deployResult.status === "fulfilled") {
+        const list = deployResult.value;
+        result["deploy_requests"] = {
+          total: list.data.length,
+          page: list.current_page,
+          next_page: list.next_page,
+          requests: list.data.map(summarizeDeployRequest),
+        };
+      } else {
+        result["deploy_requests"] = {
+          error: deployResult.reason instanceof PlanetScaleAPIError
+            ? `${deployResult.reason.message} (status: ${deployResult.reason.statusCode})`
+            : "Failed to fetch deploy requests",
+        };
+      }
+
+      if (includeWorkflows) {
+        if (workflowResult.status === "fulfilled" && workflowResult.value) {
+          const list = workflowResult.value;
+          result["workflows"] = {
+            total: list.data.length,
+            page: list.current_page,
+            next_page: list.next_page,
+            workflows: list.data.map(summarizeWorkflow),
+          };
+        } else if (workflowResult.status === "rejected") {
+          result["workflows"] = {
+            error: workflowResult.reason instanceof PlanetScaleAPIError
+              ? `${workflowResult.reason.message} (status: ${workflowResult.reason.statusCode})`
+              : "Failed to fetch workflows",
+          };
+        }
+      }
+
+      return ctx.json(result);
     } catch (error) {
       if (error instanceof PlanetScaleAPIError) {
         return ctx.text(`Error: ${error.message} (status: ${error.statusCode})`);
