@@ -68,21 +68,67 @@ interface PaginatedList<T> {
 }
 
 function summarizeDeployRequest(entry: DeployRequest) {
-  const ops = entry.deployment.deploy_operations.map((op) => {
+  // Deduplicate per-shard operations: the API returns one operation per shard
+  // for sharded keyspaces with identical DDL but potentially different progress.
+  // Group by (keyspace, table, operation, ddl) and aggregate the varying fields
+  // (state, progress, eta) across shards.
+  const grouped = new Map<string, DeployOperation[]>();
+  for (const op of entry.deployment.deploy_operations) {
+    const key = `${op.keyspace_name}|${op.table_name}|${op.operation_name}|${op.ddl_statement}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.push(op);
+    } else {
+      grouped.set(key, [op]);
+    }
+  }
+
+  const ops = Array.from(grouped.values()).map((shardOps) => {
+    const first = shardOps[0]!;
     const summary: Record<string, unknown> = {
-      keyspace: op.keyspace_name,
-      table: op.table_name,
-      operation: op.operation_name,
-      ddl: op.ddl_statement,
-      state: op.state,
+      keyspace: first.keyspace_name,
+      table: first.table_name,
+      operation: first.operation_name,
+      ddl: first.ddl_statement,
     };
-    if (op.progress_percentage != null) {
-      summary["progress_pct"] = op.progress_percentage;
+
+    if (shardOps.length > 1) {
+      summary["shard_count"] = shardOps.length;
+
+      // Aggregate state across shards
+      const stateCounts: Record<string, number> = {};
+      for (const op of shardOps) {
+        stateCounts[op.state] = (stateCounts[op.state] ?? 0) + 1;
+      }
+      const uniqueStates = Object.keys(stateCounts);
+      summary["state"] = uniqueStates.length === 1
+        ? uniqueStates[0]
+        : stateCounts;
+
+      // Aggregate progress across shards
+      const progresses = shardOps.map((op) => op.progress_percentage).filter((p): p is number => p != null);
+      if (progresses.length > 0) {
+        const min = Math.min(...progresses);
+        const max = Math.max(...progresses);
+        summary["progress_pct"] = min === max ? min : { min, max };
+      }
+
+      // Aggregate ETA across shards
+      const etas = shardOps.map((op) => op.eta_seconds).filter((e): e is number => e != null && e > 0);
+      if (etas.length > 0) {
+        summary["max_eta_seconds"] = Math.max(...etas);
+      }
+    } else {
+      summary["state"] = first.state;
+      if (first.progress_percentage != null) {
+        summary["progress_pct"] = first.progress_percentage;
+      }
+      if (first.eta_seconds != null && first.eta_seconds > 0) {
+        summary["eta_seconds"] = first.eta_seconds;
+      }
     }
-    if (op.eta_seconds != null && op.eta_seconds > 0) {
-      summary["eta_seconds"] = op.eta_seconds;
-    }
-    if (op.can_drop_data) {
+
+    if (first.can_drop_data) {
       summary["can_drop_data"] = true;
     }
     return summary;
