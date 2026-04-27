@@ -6,6 +6,8 @@ import { getInsightsGram } from "./tools/get-insights.ts";
 import { getMetricsGram } from "./tools/get-metrics.ts";
 import { listClusterSizesGram } from "./tools/list-cluster-sizes.ts";
 import { listDeployRequestsGram } from "./tools/list-deploy-requests.ts";
+import { getDeployRequestGram } from "./tools/get-deploy-request.ts";
+import { getDeployQueueGram } from "./tools/get-deploy-queue.ts";
 import { listResizesGram } from "./tools/list-resizes.ts";
 import { searchDocumentationGram } from "./tools/search-documentation.ts";
 import { getInfrastructureGram } from "./tools/get-infrastructure.ts";
@@ -33,6 +35,8 @@ const gram = new Gram({
   .extend(getMetricsGram)
   .extend(listClusterSizesGram)
   .extend(listDeployRequestsGram)
+  .extend(getDeployRequestGram)
+  .extend(getDeployQueueGram)
   .extend(listResizesGram)
   .extend(searchDocumentationGram)
   .extend(getInfrastructureGram)
