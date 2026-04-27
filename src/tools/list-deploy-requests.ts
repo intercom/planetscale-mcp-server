@@ -52,6 +52,7 @@ interface DeployRequest {
   approved: boolean;
   actor: Actor;
   closed_by: Actor | null;
+  notes: string | null;
   deployment: Deployment;
   created_at: string;
   updated_at: string;
@@ -140,7 +141,10 @@ function summarizeDeployRequest(entry: DeployRequest) {
     deployment_state: entry.deployment_state,
     branch: entry.branch,
     into_branch: entry.into_branch,
+    approved: entry.approved,
     actor: entry.actor.display_name,
+    notes: entry.notes,
+    html_url: entry.html_url,
     auto_cutover: entry.deployment.auto_cutover,
     created_at: entry.created_at,
     deployed_at: entry.deployed_at,
@@ -161,6 +165,7 @@ async function fetchDeployRequests(
   database: string,
   authHeader: string,
   options: {
+    branch?: string;
     intoBranch?: string;
     state?: string;
     deployedAtFrom?: string;
@@ -172,6 +177,9 @@ async function fetchDeployRequests(
   const params = new URLSearchParams();
   params.set("page", String(options.page));
   params.set("per_page", String(options.perPage));
+  if (options.branch) {
+    params.set("branch", options.branch);
+  }
   if (options.intoBranch) {
     params.set("into_branch", options.intoBranch);
   }
@@ -297,6 +305,10 @@ export const listDeployRequestsGram = new Gram().tool({
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
+    branch: z
+      .string()
+      .optional()
+      .describe("Filter by source branch name"),
     into_branch: z
       .string()
       .optional()
@@ -353,6 +365,7 @@ export const listDeployRequestsGram = new Gram().tool({
 
       const [deployResult, workflowResult] = await Promise.allSettled([
         fetchDeployRequests(organization, database, authHeader, {
+          branch: input.branch,
           intoBranch: input.into_branch,
           state: input.state,
           deployedAtFrom: input.from,
