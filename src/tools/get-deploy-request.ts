@@ -193,6 +193,12 @@ function filterDeployRequest(dr: DeployRequest) {
                     ).map((c) => ({
                       keyspace_name: c.keyspace_name,
                       ratio: c.ratio,
+                      ratio_description:
+                        c.ratio === 0
+                          ? "no throttling — deployment runs at full speed"
+                          : c.ratio === 100
+                            ? "fully throttled — deployment is paused"
+                            : `${c.ratio}% throttled — deployment runs at ${100 - c.ratio}% capacity`,
                     })),
                   },
                 }
@@ -206,7 +212,7 @@ function filterDeployRequest(dr: DeployRequest) {
 export const getDeployRequestGram = new Gram().tool({
   name: "get_deploy_request",
   description:
-    "Vitess/MySQL databases only. Get details of a specific deploy request by number, including deployment status, schema change operations with per-shard progress, and approval state. Use list_deploy_requests to find deploy request numbers.",
+    "Vitess/MySQL databases only. Get details of a specific deploy request by number, including deployment status, schema change operations with per-shard progress, throttler configuration, and approval state. The throttler ratio is a brake: 0 = full speed (default), 100 = fully paused. Use list_deploy_requests to find deploy request numbers.",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
