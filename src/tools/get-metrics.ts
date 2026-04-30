@@ -1,7 +1,12 @@
 import { Gram } from "@gram-ai/functions";
 import { z } from "zod";
 import { PlanetScaleAPIError } from "../lib/planetscale-api.ts";
-import { getAuthToken, getAuthHeader } from "../lib/auth.ts";
+import {
+  getAuthToken,
+  getAuthHeader,
+  authCannotAccessInternalApi,
+  INTERNAL_API_OAUTH_REQUIRED_MESSAGE,
+} from "../lib/auth.ts";
 
 // The metrics API uses /internal/ not /v1/
 const API_BASE = "https://api.planetscale.com/internal";
@@ -191,7 +196,7 @@ async function fetchQueryMetrics(
 export const getMetricsGram = new Gram().tool({
   name: "get_metrics",
   description:
-    "Vitess/MySQL databases only. Get time-series metrics for a PlanetScale database branch. Provides two modes: (1) Branch-level aggregate metrics like rows_read, rows_written, latency_p95, queries, query_errors, and index_usage_percent over a time period. (2) Per-query metrics for specific query fingerprints, enabling before/after comparisons for optimization work. Use `get_insights` first to discover query fingerprints and their keyspaces, then use this tool with `query_ids` (format: `{fingerprint}-{keyspace}` matching the `id` field from insights) to get detailed time-series data for those queries. Note: egress_bytes values are raw bytes; the PlanetScale UI displays these as binary megabytes (1 MB = 2^20 bytes). Latencies are in milliseconds. Each data point is a [unix_timestamp, value] tuple.",
+    "Vitess/MySQL databases only. Get time-series metrics for a PlanetScale database branch. Provides two modes: (1) Branch-level aggregate metrics like rows_read, rows_written, latency_p95, queries, query_errors, and index_usage_percent over a time period. (2) Per-query metrics for specific query fingerprints, enabling before/after comparisons for optimization work. Use `get_insights` first to discover query fingerprints and their keyspaces, then use this tool with `query_ids` (format: `{fingerprint}-{keyspace}` matching the `id` field from insights) to get detailed time-series data for those queries. Note: egress_bytes values are raw bytes; the PlanetScale UI displays these as binary megabytes (1 MB = 2^20 bytes). Latencies are in milliseconds. Each data point is a [unix_timestamp, value] tuple. Hits the /internal API surface, which requires OAuth2 authentication (PLANETSCALE_OAUTH2_ACCESS_TOKEN); service tokens cannot reach this endpoint.",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
@@ -233,12 +238,12 @@ export const getMetricsGram = new Gram().tool({
       ),
   },
   async execute(ctx, input) {
-    try {
-      const env =
-        Object.keys(ctx.env).length > 0
-          ? (ctx.env as Record<string, string | undefined>)
-          : process.env;
+    const env =
+      Object.keys(ctx.env).length > 0
+        ? (ctx.env as Record<string, string | undefined>)
+        : process.env;
 
+    try {
       const auth = getAuthToken(env);
       if (!auth) {
         return ctx.text("Error: No PlanetScale authentication configured.");
@@ -311,6 +316,13 @@ export const getMetricsGram = new Gram().tool({
       }
     } catch (error) {
       if (error instanceof PlanetScaleAPIError) {
+        // /internal returns 404 for unauthorized callers (service tokens),
+        // not 401 — so a 404 with a service token almost always means the
+        // user needs to authenticate with OAuth, not that the resource is
+        // missing. Surface the actionable message instead of a bare 404.
+        if (error.statusCode === 404 && authCannotAccessInternalApi(env)) {
+          return ctx.text(`Error: ${INTERNAL_API_OAUTH_REQUIRED_MESSAGE}`);
+        }
         return ctx.text(
           `Error: ${error.message} (status: ${error.statusCode})`
         );

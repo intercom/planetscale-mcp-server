@@ -1,7 +1,12 @@
 import { Gram } from "@gram-ai/functions";
 import { z } from "zod";
 import { PlanetScaleAPIError, apiRequest, API_BASE_INTERNAL } from "../lib/planetscale-api.ts";
-import { getAuthToken, getAuthHeader } from "../lib/auth.ts";
+import {
+  getAuthToken,
+  getAuthHeader,
+  authCannotAccessInternalApi,
+  INTERNAL_API_OAUTH_REQUIRED_MESSAGE,
+} from "../lib/auth.ts";
 
 interface VtTablet {
   type: "BranchInfrastructureVtTablet";
@@ -68,7 +73,7 @@ async function fetchInfrastructure(
 export const getInfrastructureGram = new Gram().tool({
   name: "get_infrastructure",
   description:
-    "Vitess/MySQL databases only. Get the actual deployed infrastructure for a PlanetScale database branch. This is the authoritative source for shard sizing — use this tool (not get_branch_keyspaces) when asking 'what size are my shards?'. Returns real VTGate sizes, per-shard cluster sizes (hardware SKUs), tablet placement across availability zones, and keyspace state. When called without a shard parameter, returns infrastructure for the default shard only — to get a specific shard's hardware, pass the shard parameter. To get ALL shard sizes, set all_shards=true (makes one API call per shard).",
+    "Vitess/MySQL databases only. Get the actual deployed infrastructure for a PlanetScale database branch. This is the authoritative source for shard sizing — use this tool (not get_branch_keyspaces) when asking 'what size are my shards?'. Returns real VTGate sizes, per-shard cluster sizes (hardware SKUs), tablet placement across availability zones, and keyspace state. When called without a shard parameter, returns infrastructure for the default shard only — to get a specific shard's hardware, pass the shard parameter. To get ALL shard sizes, set all_shards=true (makes one API call per shard). Does NOT return storage utilization (used/total bytes), CPU/memory utilization, or query metrics. Hits the /internal API surface, which requires OAuth2 authentication (PLANETSCALE_OAUTH2_ACCESS_TOKEN); service tokens cannot reach this endpoint.",
   inputSchema: {
     organization: z.string().describe("PlanetScale organization name"),
     database: z.string().describe("Database name"),
@@ -87,12 +92,12 @@ export const getInfrastructureGram = new Gram().tool({
       .describe("Fetch infrastructure for ALL shards and return a per-shard size summary. Makes one API call per shard."),
   },
   async execute(ctx, input) {
-    try {
-      const env =
-        Object.keys(ctx.env).length > 0
-          ? (ctx.env as Record<string, string | undefined>)
-          : process.env;
+    const env =
+      Object.keys(ctx.env).length > 0
+        ? (ctx.env as Record<string, string | undefined>)
+        : process.env;
 
+    try {
       const auth = getAuthToken(env);
       if (!auth) {
         return ctx.text("Error: No PlanetScale authentication configured.");
@@ -231,6 +236,13 @@ export const getInfrastructureGram = new Gram().tool({
     } catch (error) {
       if (error instanceof PlanetScaleAPIError) {
         if (error.statusCode === 404) {
+          // /internal returns 404 for unauthorized callers (service tokens),
+          // not 401 — so a 404 with a service token almost always means the
+          // user needs to authenticate with OAuth, not that the resource is
+          // missing. Surface the actionable message instead of a bare 404.
+          if (authCannotAccessInternalApi(env)) {
+            return ctx.text(`Error: ${INTERNAL_API_OAUTH_REQUIRED_MESSAGE}`);
+          }
           return ctx.text(
             `Error: Not found. Check that the organization, database, branch, and keyspace/shard names are correct. (status: 404)`,
           );
