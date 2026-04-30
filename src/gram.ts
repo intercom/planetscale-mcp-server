@@ -15,6 +15,7 @@ import { getBranchKeyspacesGram } from "./tools/get-branch-keyspaces.ts";
 import { getBranchTablesGram, getTableSchemaGram } from "./tools/get-branch-schema.ts";
 import { listMaintenanceWindowsGram } from "./tools/list-maintenance-windows.ts";
 import { listBackupsGram } from "./tools/list-backups.ts";
+import { listCustomShardsGram } from "./tools/list-custom-shards.ts";
 
 const gram = new Gram({
   envSchema: {
@@ -44,6 +45,7 @@ const gram = new Gram({
   .extend(getBranchTablesGram)
   .extend(getTableSchemaGram)
   .extend(listMaintenanceWindowsGram)
-  .extend(listBackupsGram);
+  .extend(listBackupsGram)
+  .extend(listCustomShardsGram);
 
 export default gram;

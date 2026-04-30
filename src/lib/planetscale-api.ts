@@ -343,7 +343,7 @@ export interface Keyspace {
   vttablet_options: Record<string, string>;
 }
 
-interface PaginatedResponse<T> {
+export interface PaginatedResponse<T> {
   type: string;
   current_page: number;
   next_page: number | null;
@@ -415,5 +415,40 @@ export async function deleteVitessPassword(
     `/organizations/${encodeURIComponent(organization)}/databases/${encodeURIComponent(database)}/branches/${encodeURIComponent(branch)}/passwords/${encodeURIComponent(passwordId)}`,
     authHeader,
     { method: "DELETE" }
+  );
+}
+
+export interface CustomShard {
+  id: string;
+  type: string;
+  key_range: string;
+  override_cluster_size: string | null;
+  effective_cluster_size: string;
+  effective_cluster_display_name: string;
+  has_override: boolean;
+  active_resize: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * List custom shards (per-shard cluster sizes) for a keyspace
+ */
+export async function listCustomShards(
+  organization: string,
+  database: string,
+  branch: string,
+  keyspace: string,
+  authHeader: string,
+  options?: { page?: number; perPage?: number }
+): Promise<PaginatedResponse<CustomShard>> {
+  const params = new URLSearchParams();
+  if (options?.page) params.set("page", String(options.page));
+  if (options?.perPage) params.set("per_page", String(options.perPage));
+  const query = params.toString();
+
+  return apiRequest<PaginatedResponse<CustomShard>>(
+    `/organizations/${encodeURIComponent(organization)}/databases/${encodeURIComponent(database)}/branches/${encodeURIComponent(branch)}/keyspaces/${encodeURIComponent(keyspace)}/custom-shards${query ? `?${query}` : ""}`,
+    authHeader
   );
 }
