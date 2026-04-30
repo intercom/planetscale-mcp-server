@@ -59,3 +59,30 @@ export function getAuthHeader(env: Record<string, string | undefined> = process.
   }
   return auth.token;
 }
+
+/**
+ * Standard message for when a tool that hits the /internal API surface fails
+ * because only a service token is configured. Service tokens can only access
+ * PlanetScale's public /v1 API; /internal requires OAuth2.
+ */
+export const INTERNAL_API_OAUTH_REQUIRED_MESSAGE =
+  "This tool requires OAuth2 authentication (PLANETSCALE_OAUTH2_ACCESS_TOKEN). " +
+  "Service tokens (PLANETSCALE_API_TOKEN) cannot access PlanetScale's /internal API. " +
+  "To fix: run `pscale auth login`, then ensure the resulting OAuth token is " +
+  "exported as PLANETSCALE_OAUTH2_ACCESS_TOKEN. If both env vars are set, the " +
+  "OAuth token takes precedence automatically.";
+
+/**
+ * Check whether the configured auth can reach the /internal API surface.
+ * Returns true if a service token is being used (which cannot), false otherwise.
+ * Tools that hit /internal should call this in their 404 handler to surface a
+ * clearer error than a bare "Not found".
+ *
+ * @param env - Environment object (from ctx.env or process.env)
+ */
+export function authCannotAccessInternalApi(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  const auth = getAuthToken(env);
+  return auth?.authType === "service_token";
+}
